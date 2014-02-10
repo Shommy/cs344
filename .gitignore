@@ -16,5 +16,9 @@
 *.out
 *.app
 
+# Images
+*.png
+*.jpg
+
 # OS X stuff
 .DS_Store
