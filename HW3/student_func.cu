@@ -79,8 +79,127 @@
 
 */
 
+//#include "reference_calc.cpp"
 #include "utils.h"
+#include <float.h>
 
+#define BLOCK_SIZE 1024
+
+__device__ 
+inline float dfMax(float x, float y) {
+    return (x > y) ? x : y;
+}
+
+__device__ 
+inline float dfMin(float x, float y) {
+    return (x < y) ? x : y;
+}
+
+__device__ 
+inline void atomicFloatMax(float *address, float value) {
+    int oldval, newval, readback;
+    oldval = __float_as_int(*address);
+    newval = __float_as_int(dfMax(__int_as_float(oldval), value));
+    while ((readback=atomicCAS((int *)address, oldval, newval)) != oldval) {
+        oldval = readback;
+        newval = __float_as_int(dfMax(__int_as_float(oldval), value));
+    }
+}
+
+__device__ 
+inline void atomicFloatMin(float *address, float value) {
+    int oldval, newval, readback;
+    oldval = __float_as_int(*address);
+    newval = __float_as_int(dfMin(__int_as_float(oldval), value));
+    while ((readback=atomicCAS((int *)address, oldval, newval)) != oldval) {
+        oldval = readback;
+        newval = __float_as_int(dfMin(__int_as_float(oldval), value));
+    }
+}
+__global__
+void min_max_reduce(const float* const d_inArray,
+                    float* d_out,
+                    const size_t numElements) 
+{
+    __shared__ float partialMin[2*BLOCK_SIZE];
+    __shared__ float partialMax[2*BLOCK_SIZE];
+
+    unsigned int t = threadIdx.x;
+    unsigned int start = 2 * blockIdx.x * blockDim.x;
+
+    partialMin[t] = (start + t >= numElements) ? FLT_MAX : d_inArray[start+t];
+    partialMin[blockDim.x + t] = (start + blockDim.x + t >= numElements) ? FLT_MAX : d_inArray[start + blockDim.x + t];
+
+    partialMax[t] = (start + t >= numElements) ? FLT_MIN : d_inArray[start+t];
+    partialMax[blockDim.x + t] = (start + blockDim.x + t >= numElements) ? FLT_MIN : d_inArray[start + blockDim.x + t];
+
+    for(unsigned int stride = blockDim.x; stride > 0; stride /= 2) {
+        __syncthreads();
+        if (t < stride) {
+            partialMin[t] = min(partialMin[t + stride], partialMin[t]);
+            partialMax[t] = max(partialMax[t + stride], partialMax[t]);
+        }
+    }
+    __syncthreads();
+    if (t == 0) {
+        atomicFloatMax(&d_out[0], partialMax[0]);
+    }
+    if (t == 1) {
+        atomicFloatMin(&d_out[1], partialMin[0]);
+    }
+}
+
+__global__
+void histogram(const float* const d_logLuminance, 
+               unsigned int* d_histo, const float range, 
+               const float min_lum, const size_t numBins,
+               const size_t numElements)
+{
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= numElements) return;
+    unsigned int bin = min(static_cast<unsigned int>(numBins - 1),
+                           static_cast<unsigned int>((d_logLuminance[index] - min_lum) / range * numBins));
+    atomicAdd(&d_histo[bin], 1);
+}
+
+__global__ void exclusive_scan(const unsigned int* const d_histo, unsigned int* const d_cdf, const size_t numBins)
+{
+    extern __shared__ float temp[]; // allocated on invocation
+    int thid = threadIdx.x;
+    int offset = 1;
+    temp[2*thid] = static_cast<float>(d_histo[2*thid]); // load input into shared memory
+    temp[2*thid+1] = static_cast<float>(d_histo[2*thid+1]);
+    #pragma UNROLL
+    for (int d = numBins>>1; d > 0; d >>= 1) // build sum in place up the tree
+    {
+        __syncthreads();
+        if (thid < d)
+        {
+            int ai = offset*(2*thid+1)-1;
+            int bi = offset*(2*thid+2)-1;
+            temp[bi] += temp[ai];
+        }
+        offset *= 2;
+    }
+    if (thid == 0) { temp[numBins - 1] = 0; } // clear the last element
+    #pragma UNROLL
+    for (int d = 1; d < numBins; d *= 2) // traverse down tree & build scan
+    {
+        offset >>= 1;
+        __syncthreads();
+        if (thid < d)
+        {
+            int ai = offset*(2*thid+1)-1;
+            int bi = offset*(2*thid+2)-1;
+            float t = temp[ai];
+            temp[ai] = temp[bi];
+            temp[bi] += t;
+        }
+    }
+    __syncthreads();
+    d_cdf[2*thid] = static_cast<unsigned int>(temp[2*thid]); // write results to device memory
+    d_cdf[2*thid+1] = static_cast<unsigned int>(temp[2*thid+1]);
+}
 void your_histogram_and_prefixsum(const float* const d_logLuminance,
                                   unsigned int* const d_cdf,
                                   float &min_logLum,
@@ -88,17 +207,32 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
                                   const size_t numRows,
                                   const size_t numCols,
                                   const size_t numBins)
-{
-  //TODO
-  /*Here are the steps you need to implement
-    1) find the minimum and maximum value in the input logLuminance channel
-       store in min_logLum and max_logLum
-    2) subtract them to find the range
-    3) generate a histogram of all the values in the logLuminance channel using
-       the formula: bin = (lum[i] - lumMin) / lumRange * numBins
-    4) Perform an exclusive scan (prefix sum) on the histogram to get
-       the cumulative distribution of luminance values (this should go in the
-       incoming d_cdf pointer which already has been allocated for you)       */
+{    
+    size_t numInputElements = numRows * numCols;
+    size_t gridSize = (numInputElements-1)/BLOCK_SIZE + 1;
+    dim3 DimGrid(gridSize, 1, 1);
+    dim3 DimBlock(BLOCK_SIZE, 1, 1);
+    
+    checkCudaErrors(cudaMemset((float*)d_cdf, FLT_MIN, sizeof(float)));
+    checkCudaErrors(cudaMemset((float*)(d_cdf + 1), FLT_MAX, sizeof(float)));
 
+    min_max_reduce<<<DimGrid, DimBlock>>>(d_logLuminance, (float *)d_cdf, numInputElements);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
+    checkCudaErrors(cudaMemcpy(&max_logLum, (unsigned int*)&d_cdf[0], sizeof(float), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaMemcpy(&min_logLum, (unsigned int*)&d_cdf[1], sizeof(float), cudaMemcpyDeviceToHost));
+
+    float range = max_logLum - min_logLum;
+    unsigned int *d_histo;
+    checkCudaErrors(cudaMalloc(&d_histo, numBins * sizeof(unsigned int)));
+    checkCudaErrors(cudaMemset(d_histo, 0, numBins * sizeof(unsigned int)));
+    
+    histogram<<<DimGrid, DimBlock>>>(d_logLuminance, d_histo, range, min_logLum, numBins, numInputElements);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+    
+    exclusive_scan<<<1, numBins/2, numBins*sizeof(float)>>>(d_histo, d_cdf, numBins);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
+    checkCudaErrors(cudaFree(d_histo));
 
 }
