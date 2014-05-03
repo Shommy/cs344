@@ -23,29 +23,29 @@ void gaussian_blur(const uchar4* const inputChannel,
   // Upper-left corner is loading all apron corners
   if (threadIdx.x < radius && threadIdx.y < radius) {
   // 1. upper-left apron
-    x = min(max(col - radius, 0), static_cast<int>(numCols - 1));
-    y = min(max(row - radius, 0), static_cast<int>(numRows - 1));
+    x = max(col - radius, 0);
+    y = max(row - radius, 0);
     bx = threadIdx.x;
     by = threadIdx.y;
     buff[by][bx] = inputChannel[y * numCols + x];
   
   // 2. upper-right apron
-    x = min(max(col + BLOCK_WIDTH, 0), static_cast<int>(numCols - 1));
-    y = min(max(row - radius, 0), static_cast<int>(numRows - 1));
+    x = min(col + BLOCK_WIDTH, static_cast<int>(numCols - 1));
+    y = max(row - radius, 0);
     bx = (x == numCols - 1) ? (numCols % BLOCK_WIDTH + radius + threadIdx.x) : (radius + BLOCK_WIDTH + threadIdx.x);
     by = threadIdx.y;
     buff[by][bx] = inputChannel[y * numCols + x];
 
   // 3. lower-left apron
-    x = min(max(col - radius, 0), static_cast<int>(numCols - 1));
-    y = min(max(row + BLOCK_WIDTH, 0), static_cast<int>(numRows - 1));
+    x = max(col - radius, 0);
+    y = min(row + BLOCK_WIDTH, static_cast<int>(numRows - 1));
     bx = threadIdx.x;
     by = (y == numRows - 1) ? (numRows % BLOCK_WIDTH + radius + threadIdx.y) : (radius + BLOCK_WIDTH + threadIdx.y);
     buff[by][bx] = inputChannel[y * numCols + x];
 
   // 4. lower-right apron
-    x = min(max(col + BLOCK_WIDTH, 0), static_cast<int>(numCols - 1));
-    y = min(max(row + BLOCK_WIDTH, 0), static_cast<int>(numRows - 1));
+    x = min(col + BLOCK_WIDTH, static_cast<int>(numCols - 1));
+    y = min(row + BLOCK_WIDTH, static_cast<int>(numRows - 1));
     bx = (x == numCols - 1) ? (numCols % BLOCK_WIDTH + radius + threadIdx.x) : (radius + BLOCK_WIDTH + threadIdx.x);
     by = (y == numRows - 1) ? (numRows % BLOCK_WIDTH + radius + threadIdx.y) : (radius + BLOCK_WIDTH + threadIdx.y);
     buff[by][bx] = inputChannel[y * numCols + x];
@@ -55,14 +55,14 @@ void gaussian_blur(const uchar4* const inputChannel,
   if (threadIdx.y < radius) {
   // 5. upper apron
     x = col;
-    y = min(max(row - radius, 0), static_cast<int>(numRows - 1));
+    y = max(row - radius, 0);
     bx = threadIdx.x + radius;
     by = threadIdx.y;
     buff[by][bx] = inputChannel[y * numCols + x];
 
   // 6. lower apron
     x = col;
-    y = min(max(row + BLOCK_WIDTH, 0), static_cast<int>(numRows - 1));
+    y = min(row + BLOCK_WIDTH, static_cast<int>(numRows - 1));
     bx = threadIdx.x + radius;
     by = (y == numRows - 1) ? (numRows % BLOCK_WIDTH + radius + threadIdx.y) : (radius + BLOCK_WIDTH + threadIdx.y);
     buff[by][bx] = inputChannel[y * numCols + x];
@@ -71,7 +71,7 @@ void gaussian_blur(const uchar4* const inputChannel,
   // Left radius columns are loading both vertical aprons
   if (threadIdx.x < radius) {
   // 7. left apron
-    x = min(max(col - radius, 0), static_cast<int>(numCols - 1));
+    x = max(col - radius, 0);
     y = row;
     bx = threadIdx.x;
     by = threadIdx.y + radius;
@@ -79,7 +79,7 @@ void gaussian_blur(const uchar4* const inputChannel,
   
   // 8. right apron
     y = row;
-    x = min(max(col + BLOCK_WIDTH, 0), static_cast<int>(numCols - 1));
+    x = min(col + BLOCK_WIDTH, static_cast<int>(numCols - 1));
     by = radius + threadIdx.y;
     bx = (x == numCols - 1) ? (numCols % BLOCK_WIDTH + radius + threadIdx.x) : (radius + BLOCK_WIDTH + threadIdx.x);
     buff[by][bx] = inputChannel[y * numCols + x];
