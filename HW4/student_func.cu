@@ -3,6 +3,8 @@
 
 #include "utils.h"
 #include <thrust/host_vector.h>
+#include <stdio.h>
+//#include "reference_calc.h"
 
 /* Red Eye Removal
    ===============
@@ -42,6 +44,35 @@
 
  */
 
+#define BLOCK_SIZE 512
+
+__global__
+void histogram(const unsigned int * const d_inputVals,
+               unsigned int* d_binHistogram,
+               const unsigned int mask,
+               const unsigned int shift,
+               const size_t numElems)
+{
+  int index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= numElems) return;
+
+  unsigned int bin = (d_inputVals[index] & mask) >> shift;
+  atomicAdd(&d_binHistogram[bin], 1); 
+}
+
+__global__
+void scanSerialOnDevice(const unsigned int* const d_binHistogram,
+                        unsigned int* d_binScan,
+                        const size_t numBins)
+{
+  int index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index > 0) return; // just one thread will work
+
+  for (unsigned int i = 1; i < numBins; ++i)
+  {
+    d_binScan[i] = d_binScan[i - 1] + d_binHistogram[i - 1];
+  } 
+}
 
 void your_sort(unsigned int* const d_inputVals,
                unsigned int* const d_inputPos,
@@ -49,6 +80,55 @@ void your_sort(unsigned int* const d_inputVals,
                unsigned int* const d_outputPos,
                const size_t numElems)
 { 
-  //TODO
-  //PUT YOUR SORT HERE
+  const int numBits = 2;
+  const int numBins = 1 << numBits;
+
+  unsigned int firstInputValue;
+  checkCudaErrors(cudaMemcpy(&firstInputValue, d_inputVals, sizeof(unsigned int), cudaMemcpyDeviceToHost));
+  printf("d_inputVals[0] = %u\n", firstInputValue);
+  printf("numElems = %u\n", numElems);
+
+  // Create d_binHistogram and d_binScan from d_inputVals
+  // First, allocate memory on the GPU.
+  unsigned int *d_binHistogram, *d_binScan;
+  checkCudaErrors(cudaMalloc((void**)&d_binHistogram, numBins * sizeof(unsigned int)));
+  checkCudaErrors(cudaMalloc((void**)&d_binScan, numBins * sizeof(unsigned int)));
+
+  for (unsigned int i = 0; i < 8 * sizeof(unsigned int); i += numBits) 
+  {
+    unsigned int mask = (numBins - 1) << i;
+
+    // Zero out the bins
+    checkCudaErrors(cudaMemset((void*)d_binHistogram, 0, numBins * sizeof(unsigned int)));
+    checkCudaErrors(cudaMemset(d_binScan, 0, numBins * sizeof(unsigned int)));
+
+    //perform histogram of data & mask into bins
+    unsigned int gridSize = (numElems - 1)/BLOCK_SIZE + 1;
+    dim3 DimGrid(gridSize, 1, 1);
+    dim3 BlockDim(BLOCK_SIZE, 1, 1);
+
+    histogram<<<DimGrid, BlockDim>>>(d_inputVals, d_binHistogram, mask, i, numElems);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
+
+    // perform exclusive prefix sum (scan) on binHistogram to get starting
+    // location for each bin
+    // scan is serial because of small array length
+    scanSerialOnDevice<<<1,1>>>(d_binHistogram, d_binScan, numBins);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
+
+    // //Gather everything into the correct location
+    // //need to move vals and positions
+    // for (unsigned int j = 0; j < numElems; ++j) {
+    //   unsigned int bin = (vals_src[j] & mask) >> i;
+    //   vals_dst[binScan[bin]] = vals_src[j];
+    //   pos_dst[binScan[bin]]  = pos_src[j];
+    //   binScan[bin]++;
+    // }
+
+    //swap the buffers (pointers only)
+    // std::swap(vals_dst, vals_src);
+    // std::swap(pos_dst, pos_src);
+  }
 }

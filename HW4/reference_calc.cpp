@@ -1,6 +1,7 @@
 #include <algorithm>
 // For memset
 #include <cstring>
+#include <cstdio>
 
 void reference_calculation(unsigned int* inputVals,
                            unsigned int* inputPos,
@@ -8,7 +9,7 @@ void reference_calculation(unsigned int* inputVals,
                            unsigned int* outputPos,
                            const size_t numElems)
 {
-  const int numBits = 1;
+  const int numBits = 2;
   const int numBins = 1 << numBits;
 
   unsigned int *binHistogram = new unsigned int[numBins];
@@ -20,6 +21,7 @@ void reference_calculation(unsigned int* inputVals,
   unsigned int *vals_dst = outputVals;
   unsigned int *pos_dst  = outputPos;
 
+  printf("inputVals[0] = %u\n", inputVals[0]);
   //a simple radix sort - only guaranteed to work for numBits that are multiples of 2
   for (unsigned int i = 0; i < 8 * sizeof(unsigned int); i += numBits) {
     unsigned int mask = (numBins - 1) << i;
@@ -38,6 +40,12 @@ void reference_calculation(unsigned int* inputVals,
     for (unsigned int j = 1; j < numBins; ++j) {
       binScan[j] = binScan[j - 1] + binHistogram[j - 1];
     }
+
+    // for (int ii = 0; ii < numBins; ++ii)
+    // {
+    //   printf("[reference] binScan[%d] = %u\n", ii, binScan[ii]);
+    // }
+
 
     //Gather everything into the correct location
     //need to move vals and positions
