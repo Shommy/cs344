@@ -4,6 +4,7 @@
 #include "utils.h"
 #include <thrust/host_vector.h>
 #include <stdio.h>
+#include <algorithm>
 //#include "reference_calc.h"
 
 /* Red Eye Removal
@@ -58,6 +59,8 @@ void histogram(const unsigned int * const d_inputVals,
 
   unsigned int bin = (d_inputVals[index] & mask) >> shift;
   atomicAdd(&d_binHistogram[bin], 1); 
+
+  // TODO: put scan here
 }
 
 __global__
@@ -74,19 +77,122 @@ void scanSerialOnDevice(const unsigned int* const d_binHistogram,
   } 
 }
 
-void your_sort(unsigned int* const d_inputVals,
-               unsigned int* const d_inputPos,
-               unsigned int* const d_outputVals,
-               unsigned int* const d_outputPos,
+// __global__
+// void move_vals_and_positions(const unsigned int* const d_inVals, 
+//                              const unsigned int* const d_inPos,
+//                              unsigned int* d_outVals,
+//                              unsigned int* d_outPos, 
+//                              const unsigned int* const d_binScan,
+//                              unsigned int mask, 
+//                              unsigned int shift, 
+//                              const size_t numElems, 
+//                              const size_t numBins) 
+// {
+//    int index = blockIdx.x * blockDim.x + threadIdx.x;
+//    int thid = threadIdx.x;
+//    if (index >= numElems) return;
+
+//    extern __shared__ unsigned int temp[];
+
+//    int offset = 1;
+//    unsigned int bin = (d_inVals[index] & mask) >> shift;
+//    for (int i = 0; i < numBins; ++i) 
+//    {
+//       temp[i*BLOCK_SIZE + thid] = (i == bin) ? 1 : 0; // load input into shared memory
+      
+//    }
+
+//    if (thid < BLOCK_SIZE/2) 
+//    {
+//       #pragma UNROLL
+//       for (int d = BLOCK_SIZE>>1; d > 0; d >>= 1) // build sum in place up the tree
+//       {
+//          __syncthreads();
+//          if (thid < d)
+//          {
+//             int ai = offset*(2*thid+1)-1;
+//             int bi = offset*(2*thid+2)-1;
+//             for (int i = 0; i < numBins; ++i)
+//             {
+//                temp[i*BLOCK_SIZE + bi] += temp[i*BLOCK_SIZE + ai];
+//             }
+//          }
+//          offset *= 2;
+//       }
+//       if (thid == 0)  // clear the last element
+//       {
+//          #pragma UNROLL
+//          for (int i = 0; i < numBins; ++i) 
+//          {
+//             temp[i*BLOCK_SIZE + numBins - 1] = 0;
+//          }  
+//       } 
+      
+//       #pragma UNROLL
+//       for (int d = 1; d < numBins; d *= 2) // traverse down tree & build scan
+//       {
+//          offset >>= 1;
+//          __syncthreads();
+//          if (thid < d)
+//          {
+//             int ai = offset*(2*thid+1)-1;
+//             int bi = offset*(2*thid+2)-1;
+//             #pragma UNROLL
+//             for (int i = 0; i < numBins; ++i) 
+//             {
+//                unsigned int t = temp[i*BLOCK_SIZE + ai];
+//                temp[i*BLOCK_SIZE + ai] = temp[i*BLOCK_SIZE + bi];
+//                temp[i*BLOCK_SIZE + bi] += t;   
+//             }
+//          }
+//       }
+//    }
+//    __syncthreads();
+
+//    unsigned int pos = temp[bin*BLOCK_SIZE + thid];
+//    pos += d_binScan[bin];
+
+//    d_outVals[pos] = d_inVals[index];
+//    d_outPos[pos]  = d_inPos[index];
+// }
+
+__global__
+void gatherInCorrectLocation(const unsigned int* const d_inputVals,
+                             const unsigned int* const d_inputPos,
+                             unsigned int* d_outputVals,
+                             unsigned int* d_outputPos,
+                             unsigned int* d_binScan,
+                             const unsigned int mask,
+                             const unsigned int shift,
+                             const size_t numElems)
+{
+  int index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index > 0) return;
+
+  //Gather everything into the correct location
+  //need to move vals and positions
+  for (unsigned int j = 0; j < numElems; ++j) 
+  {
+    unsigned int bin = (d_inputVals[j] & mask) >> shift;
+    d_outputVals[d_binScan[bin]] = d_inputVals[j];
+    d_outputPos[d_binScan[bin]]  = d_inputPos[j];
+    d_binScan[bin]++;
+  }
+}
+
+void your_sort(unsigned int* const d_inVals,
+               unsigned int* const d_inPos,
+               unsigned int* const d_outVals,
+               unsigned int* const d_outPos,
                const size_t numElems)
 { 
   const int numBits = 2;
   const int numBins = 1 << numBits;
 
-  unsigned int firstInputValue;
-  checkCudaErrors(cudaMemcpy(&firstInputValue, d_inputVals, sizeof(unsigned int), cudaMemcpyDeviceToHost));
-  printf("d_inputVals[0] = %u\n", firstInputValue);
-  printf("numElems = %u\n", numElems);
+  unsigned int* d_inputVals = d_inVals;
+  unsigned int* d_inputPos = d_inPos;
+  unsigned int* d_outputVals = d_outVals;
+  unsigned int* d_outputPos = d_outPos;
 
   // Create d_binHistogram and d_binScan from d_inputVals
   // First, allocate memory on the GPU.
@@ -105,9 +211,9 @@ void your_sort(unsigned int* const d_inputVals,
     //perform histogram of data & mask into bins
     unsigned int gridSize = (numElems - 1)/BLOCK_SIZE + 1;
     dim3 DimGrid(gridSize, 1, 1);
-    dim3 BlockDim(BLOCK_SIZE, 1, 1);
+    dim3 DimBlock(BLOCK_SIZE, 1, 1);
 
-    histogram<<<DimGrid, BlockDim>>>(d_inputVals, d_binHistogram, mask, i, numElems);
+    histogram<<<DimGrid, DimBlock>>>(d_inputVals, d_binHistogram, mask, i, numElems);
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
 
@@ -117,18 +223,45 @@ void your_sort(unsigned int* const d_inputVals,
     scanSerialOnDevice<<<1,1>>>(d_binHistogram, d_binScan, numBins);
     cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
-
-    // //Gather everything into the correct location
-    // //need to move vals and positions
-    // for (unsigned int j = 0; j < numElems; ++j) {
-    //   unsigned int bin = (vals_src[j] & mask) >> i;
-    //   vals_dst[binScan[bin]] = vals_src[j];
-    //   pos_dst[binScan[bin]]  = pos_src[j];
-    //   binScan[bin]++;
-    // }
+    // Gather everything into the correct location
+    // need to move vals and positions
+    // move_vals_and_positions<<<DimGrid, DimBlock, BLOCK_SIZE*sizeof(unsigned int)*numBins>>>(
+    //                                                               d_inputVals,
+    //                                                               d_inputPos,
+    //                                                               d_outputVals,
+    //                                                               d_outputPos,
+    //                                                               d_binScan,
+    //                                                               mask,
+    //                                                               i,
+    //                                                               numElems,
+    //                                                               numBins);
+    gatherInCorrectLocation<<<1,1>>>(d_inputVals,
+                                     d_inputPos,
+                                     d_outputVals,
+                                     d_outputPos,
+                                     d_binScan,
+                                     mask,
+                                     i,
+                                     numElems);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
     //swap the buffers (pointers only)
-    // std::swap(vals_dst, vals_src);
-    // std::swap(pos_dst, pos_src);
+    std::swap(d_outputVals, d_inputVals);
+    std::swap(d_outputPos, d_inputPos);
+  }
+  checkCudaErrors(cudaMemcpy(d_outputVals, d_inputVals, numElems * sizeof(unsigned int), cudaMemcpyDeviceToDevice));
+  checkCudaErrors(cudaMemcpy(d_outputPos, d_inputPos, numElems * sizeof(unsigned int), cudaMemcpyDeviceToDevice));
+   
+  cudaFree(d_binScan);
+  cudaFree(d_binHistogram);
+
+  unsigned int* h_outputVals = new unsigned int[numElems];
+  checkCudaErrors(cudaMemcpy(h_outputVals, 
+                             d_outputVals,
+                             numElems * sizeof(unsigned int),
+                             cudaMemcpyDeviceToHost));
+  for (int i = 100; i < 110; ++i)
+  {
+    printf("d_outputVals[%d] = %u\n", i, h_outputVals[i]);
   }
 }

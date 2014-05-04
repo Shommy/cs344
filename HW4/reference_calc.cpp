@@ -21,7 +21,6 @@ void reference_calculation(unsigned int* inputVals,
   unsigned int *vals_dst = outputVals;
   unsigned int *pos_dst  = outputPos;
 
-  printf("inputVals[0] = %u\n", inputVals[0]);
   //a simple radix sort - only guaranteed to work for numBits that are multiples of 2
   for (unsigned int i = 0; i < 8 * sizeof(unsigned int); i += numBits) {
     unsigned int mask = (numBins - 1) << i;
@@ -67,4 +66,9 @@ void reference_calculation(unsigned int* inputVals,
 
   delete[] binHistogram;
   delete[] binScan;
+
+  for (int i = 100; i < 110; ++i)
+  {
+    printf("[reference] outputVals[%d] = %u\n", i, outputVals[i]);
+  }
 }
